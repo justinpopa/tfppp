@@ -1,4 +1,4 @@
-package handler
+package artifacts
 
 import (
 	"encoding/json"
@@ -25,42 +25,26 @@ type ArtifactExtra struct {
 	Format   string   `json:"Format"`
 }
 
-// Load Metadata from file into struct.
-func (h *Handler) GetArtifacts(path string) error {
+// Load Artifacts from file into struct.
+func Get(path string) (*[]Artifact, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	defer f.Close()
 
 	contents, err := io.ReadAll(f)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	err = json.Unmarshal(contents, &h.Artifacts)
+	artifacts := make([]Artifact, 0)
+
+	err = json.Unmarshal(contents, &artifacts)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return nil
-}
-
-func (h *Handler) GetShaSums() *string {
-	for _, a := range *h.Artifacts {
-		if a.Type == "Checksum" {
-			return &a.Path
-		}
-	}
-	return nil
-}
-
-func (h *Handler) GetSumsSig() *string {
-	for _, a := range *h.Artifacts {
-		if a.Type == "Signature" {
-			return &a.Path
-		}
-	}
-	return nil
+	return &artifacts, nil
 }

@@ -2,206 +2,218 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"strings"
 
 	"github.com/hashicorp/go-tfe"
-	"github.com/justinpopa/goreleaser-tfpp/internal/handler"
+	"github.com/justinpopa/tfppp/internal/artifacts"
+	"github.com/justinpopa/tfppp/internal/client"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
-const GORELEASER_MANIFEST_FILE = "dist/metadata.json"
-const GORELEASER_ARTIFACTS_FILE = "dist/artifacts.json"
+const GORELEASER_ARTIFACTS_FILE = "artifacts.json"
 
 var rootCmd = &cobra.Command{
-	Use:   "goreleaser-tfpp",
-	Short: "Custom publisher for goreleaser to upload the necessary files to Terraform Cloud",
+	Use:   "tfppp",
+	Short: "Terraform Private Provider Publisher",
+	Long:  `Custom publisher for goreleaser that takes the dist folder output from goreleaser and a few env vars to publish private providers to TFC.`,
+	Args:  cobra.ExactArgs(6),
 	Run: func(cmd *cobra.Command, args []string) {
-		h, err := handler.NewHandler(
-			viper.GetString("TFC_TOKEN"),
-			viper.GetString("GPG_KEY_ID"),
-			viper.GetString("TFC_ORG"),
-			viper.GetString("PROVIDER_NAME"),
-			viper.GetString("PROVIDER_VERSION"),
-		)
+
+		/* Set up Provider */
+		org, err := cmd.Flags().GetString("organization")
 		if err != nil {
-			panic(err)
+			panic(err) // TODO: handle error
 		}
 
-		// check if manifest file exists and load it
-		_, err = os.Stat(GORELEASER_MANIFEST_FILE)
-		if os.IsNotExist(err) {
-			panic(err)
-		} else {
-			err = h.GetMetadata(GORELEASER_MANIFEST_FILE)
-			if err != nil {
-				panic(err)
-			}
+		fullName, err := cmd.Flags().GetString("name")
+		if err != nil {
+			panic(err) // TODO: handle error
 		}
 
-		// check if artifacts file exists and load it
-		_, err = os.Stat(GORELEASER_ARTIFACTS_FILE)
-		if os.IsNotExist(err) {
-			panic(err)
-		} else {
-			err = h.GetArtifacts(GORELEASER_ARTIFACTS_FILE)
-			if err != nil {
-				panic(err)
-			}
+		name := strings.Replace(fullName, "terraform-provider-", "", 1)
+
+		providerID := tfe.RegistryProviderID{
+			OrganizationName: org,
+			RegistryName:     tfe.PrivateRegistry,
+			Namespace:        org,
+			Name:             name,
 		}
 
 		// find or create private provider
-		provider, err := h.GetPrivateProvider()
+		provider, err := client.GetPrivateProvider(
+			providerID,
+		)
 		if err != nil && err.Error() != "resource not found" {
-			panic(err)
+			panic(err) // TODO: handle error
 		}
 
 		if provider == nil {
-			log.Printf("Creating provider %s\n", h.Metadata.Project)
-			provider, err = h.CreatePrivateProvider()
+			log.Printf("Provider %s not found. Creating.\n", name)
+			provider, err = client.CreatePrivateProvider(
+				providerID,
+			)
 			if err != nil {
-				panic(err)
+				panic(err) // TODO: handle error
 			}
 		}
 
-		// find or create private provider version
-		version, err := h.GetPrivateProviderVersion()
+		/* Set up Provider Version */
+
+		ver, err := cmd.Flags().GetString("version")
+		if err != nil {
+			panic(err) // TODO: handle error
+		}
+
+		fingerprint, err := cmd.Flags().GetString("fingerprint")
+		if err != nil {
+			panic(err) // TODO: handle error
+		}
+
+		artifactSlice, err := artifacts.Get(GORELEASER_ARTIFACTS_FILE)
+		if err != nil {
+			panic(err) // TODO: handle error
+		}
+
+		versionId := tfe.RegistryProviderVersionID{
+			RegistryProviderID: tfe.RegistryProviderID{
+				OrganizationName: provider.Organization.Name,
+				RegistryName:     tfe.PrivateRegistry,
+				Namespace:        provider.Namespace,
+				Name:             provider.Name,
+			},
+			Version: ver,
+		}
+
+		// find private provider version, if it exists. if not, create it.
+		version, err := client.GetPrivateProviderVersion(versionId)
 		if err != nil && err.Error() != "resource not found" {
-			panic(err)
+			panic(err) // TODO: handle error
 		}
 
 		if version == nil {
-			log.Printf("Creating version %s\n", h.Metadata.Tag)
-			version, err = h.CreatePrivateProviderVersion()
+			log.Printf("Version %v/%v not found. Creating.\n", name, ver)
+			version, err = client.CreatePrivateProviderVersion(versionId, fingerprint)
 			if err != nil {
-				panic(err)
+				panic(err) // TODO: handle error
 			}
-		} else {
-			log.Printf("Version %s already exists\n", h.Metadata.Tag)
 		}
 
-		// upload shasum and signature files
+		/* Sums and Sigs Upload */
 		if !version.ShasumsUploaded {
-			log.Println("Uploading checksums")
+			log.Println("Shasums have not been uploaded, uploading now.")
 
 			// get the url to upload the checksum file to
-			sums_upload_url, err := version.ShasumsUploadURL()
+			sumsUploadURL, err := version.ShasumsUploadURL()
 			if err != nil {
-				panic(err)
+				panic(err) // TODO: handle error
 			}
 
-			// upload the checksum file
-			err = handler.UploadFile(context.Background(), sums_upload_url, *h.GetShaSums())
-			if err != nil {
-				panic(err)
+			// get the checksum file out of the artifactSlice
+			for _, a := range *artifactSlice {
+				if a.Type == "Checksum" {
+					err = client.UploadFile(context.Background(), sumsUploadURL, a.Path)
+					if err != nil {
+						panic(err) // TODO: handle error
+					}
+				}
 			}
-		} else {
-			log.Println("Checksums already exist")
 		}
 
 		if !version.ShasumsSigUploaded {
-			log.Println("Uploading signatures")
+			log.Println("Shasums signatures have not been uploaded, uploading now.")
 
-			// get the url to upload the checksum file to
-			sigs_upload_url, err := version.ShasumsSigUploadURL()
+			// get the url to upload the signatures file to
+			sigsUploadURL, err := version.ShasumsSigUploadURL()
 			if err != nil {
-				panic(err)
+				panic(err) // TODO: handle error
 			}
 
-			// upload the checksum file
-			err = handler.UploadFile(context.Background(), sigs_upload_url, *h.GetSumsSig())
-			if err != nil {
-				panic(err)
+			// get the signatures file out of the artifactSlice
+			for _, a := range *artifactSlice {
+				if a.Type == "Checksum" {
+					err = client.UploadFile(context.Background(), sigsUploadURL, a.Path)
+					if err != nil {
+						panic(err) // TODO: handle error
+					}
+				}
 			}
-		} else {
-			log.Println("Signatures already exist")
 		}
 
-		// loop through the archive artifacts and upload them
-		for _, a := range *h.Artifacts {
+		/* Platform creation and upload */
+
+		filename, err := cmd.Flags().GetString("artifact")
+		if err != nil {
+			panic(err) // TODO: handle error
+		}
+
+		var artifact artifacts.Artifact
+
+		// get the platform from the artifactSlice
+		for _, a := range *artifactSlice {
 			if a.Type == "Archive" {
-				// TODO: check if the platform exists already, and if not, create it
-				platform, err := h.Client.RegistryProviderPlatforms.Read(
-					context.Background(),
-					tfe.RegistryProviderPlatformID{
-						RegistryProviderVersionID: h.RegistryProviderVersion,
-						OS:                        a.GoOS,
-						Arch:                      a.GoArch,
-					},
-				)
-				if err != nil && err.Error() != "resource not found" {
-					panic(err)
+				if strings.Contains(a.Path, filename) {
+					artifact = a
 				}
+			}
+		}
 
-				if platform != nil {
-					log.Printf("%s_%s already exists\n", a.GoOS, a.GoArch)
-				} else {
-					log.Printf("Creating platform: %s_%s\n", a.GoOS, a.GoArch)
+		platformID := tfe.RegistryProviderPlatformID{
+			RegistryProviderVersionID: versionId,
+			OS:                        artifact.GoOS,
+			Arch:                      artifact.GoArch,
+		}
 
-					platform, err = h.Client.RegistryProviderPlatforms.Create(
-						context.Background(),
-						h.RegistryProviderVersion,
-						tfe.RegistryProviderPlatformCreateOptions{
-							OS:       a.GoOS,
-							Arch:     a.GoArch,
-							Shasum:   strings.Split(a.Extra.Checksum, ":")[1],
-							Filename: a.Name,
-						},
-					)
-					if err != nil {
-						panic(err)
-					}
-				}
+		// find platform if it exists. if not, create it.
+		platform, err := client.GetPrivateProviderPlatform(platformID)
+		if err != nil && err.Error() != "resource not found" {
+			panic(err) // TODO: handle error
+		}
 
-				if !platform.ProviderBinaryUploaded {
-					log.Printf("Uploading %s\n", a.Name)
+		if platform == nil {
+			log.Printf("Platform %v/%v/%v_%v not found. Creating.\n", name, ver, platformID.OS, platformID.Arch)
+			platform, err = client.CreatePrivateProviderPlatform(platformID, artifact.Extra.Checksum, filename)
+			if err != nil {
+				panic(err) // TODO: handle error
+			}
+		}
 
-					// upload the artifact
-					err = handler.UploadFile(
-						context.Background(),
-						platform.Links["provider-binary-upload"].(string),
-						a.Path,
-					)
-					if err != nil {
-						panic(err)
-					}
+		// upload the artifact if it hasn't been uploaded yet
+		if !platform.ProviderBinaryUploaded {
+			log.Printf("Uploading %s\n", filename)
 
-				} else {
-					log.Printf("%s already uploaded, skipping.\n", a.Name)
-				}
+			// upload the artifact
+			err := client.UploadFile(
+				context.Background(),
+				platform.Links["provider-binary-upload"].(string),
+				filename,
+			)
+			if err != nil {
+				panic(err) // TODO: handle error
 			}
 		}
 	},
 }
 
-func Execute() error {
-	err := rootCmd.Execute()
-	return err
+func AddCommand(cmd *cobra.Command) {
+	rootCmd.AddCommand(cmd)
+}
+
+func Execute() {
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 }
 
 func init() {
-	cobra.OnInitialize(initEnvs)
-
-	flags := rootCmd.Flags()
-
-	flags.String("tfc_token", "", "Terraform Cloud API token used to publish the provider")
-	viper.BindPFlag("TFC_TOKEN", flags.Lookup("tfc_token"))
-
-	flags.String("tfc_org", "", "Terraform Cloud organization the provider is published to")
-	viper.BindPFlag("TFC_ORG", flags.Lookup("tfc_org"))
-
-	flags.String("gpg_key_id", "", "GPG key ID used to sign the provider binaries")
-	viper.BindPFlag("GPG_KEY_ID", flags.Lookup("gpg_key_id"))
-
-	flags.String("provider_name", "", "Name of the provider")
-	viper.BindPFlag("PROVIDER_NAME", flags.Lookup("provider_name"))
-
-	flags.String("project_version", "", "Version of the provider")
-	viper.BindPFlag("PROVIDER_VERSION", flags.Lookup("provider_version"))
-}
-
-func initEnvs() {
-	viper.AutomaticEnv()
+	// Add flags
+	rootCmd.Flags().StringP("artifact", "a", "", "Artifact name, e.g.: terraform-provider-hashicups_0.0.1_darwin_arm64.zip")
+	rootCmd.Flags().StringP("name", "n", "", "Full project name, e.g.: terraform-provider-hashicups")
+	rootCmd.Flags().StringP("version", "v", "", "Version, e.g.: 0.1.1")
+	rootCmd.Flags().StringP("fingerprint", "f", "", "GPG fingerprint")
+	rootCmd.Flags().StringP("organization", "o", "", "TFC Organization")
+	rootCmd.Flags().StringP("token", "t", "", "TFC Token")
 }
