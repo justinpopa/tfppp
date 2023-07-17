@@ -11,8 +11,7 @@ import (
 )
 
 // GetPrivateProvider returns the provider if it exists, otherwise nil.
-func GetPrivateProvider(id tfe.RegistryProviderID) (*tfe.RegistryProvider, error) {
-	c := tfe.Client{}
+func GetPrivateProvider(c *tfe.Client, id tfe.RegistryProviderID) (*tfe.RegistryProvider, error) {
 	resp, err := c.RegistryProviders.Read(
 		context.Background(),
 		id,
@@ -26,8 +25,7 @@ func GetPrivateProvider(id tfe.RegistryProviderID) (*tfe.RegistryProvider, error
 }
 
 // CreatePrivateProvider creates a private provider in the organization.
-func CreatePrivateProvider(id tfe.RegistryProviderID) (*tfe.RegistryProvider, error) {
-	c := tfe.Client{}
+func CreatePrivateProvider(c *tfe.Client, id tfe.RegistryProviderID) (*tfe.RegistryProvider, error) {
 	p, err := c.RegistryProviders.Create(
 		context.Background(),
 		id.OrganizationName,
@@ -45,8 +43,7 @@ func CreatePrivateProvider(id tfe.RegistryProviderID) (*tfe.RegistryProvider, er
 }
 
 // GetPrivateProviderVersion returns the version if it exists, otherwise nil.
-func GetPrivateProviderVersion(version tfe.RegistryProviderVersionID) (*tfe.RegistryProviderVersion, error) {
-	c := tfe.Client{}
+func GetPrivateProviderVersion(c *tfe.Client, version tfe.RegistryProviderVersionID) (*tfe.RegistryProviderVersion, error) {
 	resp, err := c.RegistryProviderVersions.Read(
 		context.Background(),
 		version,
@@ -59,8 +56,7 @@ func GetPrivateProviderVersion(version tfe.RegistryProviderVersionID) (*tfe.Regi
 }
 
 // CreatePrivateProviderVersion creates a version of the private provider.
-func CreatePrivateProviderVersion(version tfe.RegistryProviderVersionID, gpgKeyID string) (*tfe.RegistryProviderVersion, error) {
-	c := tfe.Client{}
+func CreatePrivateProviderVersion(c *tfe.Client, version tfe.RegistryProviderVersionID, gpgKeyID string) (*tfe.RegistryProviderVersion, error) {
 	v, err := c.RegistryProviderVersions.Create(
 		context.Background(),
 		version.RegistryProviderID,
@@ -76,8 +72,7 @@ func CreatePrivateProviderVersion(version tfe.RegistryProviderVersionID, gpgKeyI
 	return v, err
 }
 
-func GetPrivateProviderPlatform(plat tfe.RegistryProviderPlatformID) (*tfe.RegistryProviderPlatform, error) {
-	c := tfe.Client{}
+func GetPrivateProviderPlatform(c *tfe.Client, plat tfe.RegistryProviderPlatformID) (*tfe.RegistryProviderPlatform, error) {
 	resp, err := c.RegistryProviderPlatforms.Read(
 		context.Background(),
 		plat,
@@ -89,8 +84,7 @@ func GetPrivateProviderPlatform(plat tfe.RegistryProviderPlatformID) (*tfe.Regis
 	return resp, nil
 }
 
-func CreatePrivateProviderPlatform(plat tfe.RegistryProviderPlatformID, shasum, filename string) (*tfe.RegistryProviderPlatform, error) {
-	c := tfe.Client{}
+func CreatePrivateProviderPlatform(c *tfe.Client, plat tfe.RegistryProviderPlatformID, shasum, filename string) (*tfe.RegistryProviderPlatform, error) {
 	resp, err := c.RegistryProviderPlatforms.Create(
 		context.Background(),
 		plat.RegistryProviderVersionID,

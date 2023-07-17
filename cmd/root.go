@@ -2,25 +2,37 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
 
 	"github.com/hashicorp/go-tfe"
-	"github.com/justinpopa/tfppp/internal/artifacts"
 	"github.com/justinpopa/tfppp/internal/client"
 	"github.com/spf13/cobra"
 )
-
-const GORELEASER_ARTIFACTS_FILE = "artifacts.json"
 
 var rootCmd = &cobra.Command{
 	Use:   "tfppp",
 	Short: "Terraform Private Provider Publisher",
 	Long:  `Custom publisher for goreleaser that takes the dist folder output from goreleaser and a few env vars to publish private providers to TFC.`,
-	Args:  cobra.ExactArgs(6),
 	Run: func(cmd *cobra.Command, args []string) {
+
+		/* Set up TFC Client */
+		token, err := cmd.Flags().GetString("token")
+		if err != nil {
+			panic(err) // TODO: handle error
+		}
+
+		config := tfe.DefaultConfig()
+		config.Token = token
+
+		c, err := tfe.NewClient(config)
+		if err != nil {
+			panic(err) // TODO: handle error
+		}
 
 		/* Set up Provider */
 		org, err := cmd.Flags().GetString("organization")
@@ -44,6 +56,7 @@ var rootCmd = &cobra.Command{
 
 		// find or create private provider
 		provider, err := client.GetPrivateProvider(
+			c,
 			providerID,
 		)
 		if err != nil && err.Error() != "resource not found" {
@@ -53,6 +66,7 @@ var rootCmd = &cobra.Command{
 		if provider == nil {
 			log.Printf("Provider %s not found. Creating.\n", name)
 			provider, err = client.CreatePrivateProvider(
+				c,
 				providerID,
 			)
 			if err != nil {
@@ -72,11 +86,6 @@ var rootCmd = &cobra.Command{
 			panic(err) // TODO: handle error
 		}
 
-		artifactSlice, err := artifacts.Get(GORELEASER_ARTIFACTS_FILE)
-		if err != nil {
-			panic(err) // TODO: handle error
-		}
-
 		versionId := tfe.RegistryProviderVersionID{
 			RegistryProviderID: tfe.RegistryProviderID{
 				OrganizationName: provider.Organization.Name,
@@ -88,14 +97,21 @@ var rootCmd = &cobra.Command{
 		}
 
 		// find private provider version, if it exists. if not, create it.
-		version, err := client.GetPrivateProviderVersion(versionId)
+		version, err := client.GetPrivateProviderVersion(
+			c,
+			versionId,
+		)
 		if err != nil && err.Error() != "resource not found" {
 			panic(err) // TODO: handle error
 		}
 
 		if version == nil {
 			log.Printf("Version %v/%v not found. Creating.\n", name, ver)
-			version, err = client.CreatePrivateProviderVersion(versionId, fingerprint)
+			version, err = client.CreatePrivateProviderVersion(
+				c,
+				versionId,
+				fingerprint,
+			)
 			if err != nil {
 				panic(err) // TODO: handle error
 			}
@@ -111,14 +127,18 @@ var rootCmd = &cobra.Command{
 				panic(err) // TODO: handle error
 			}
 
-			// get the checksum file out of the artifactSlice
-			for _, a := range *artifactSlice {
-				if a.Type == "Checksum" {
-					err = client.UploadFile(context.Background(), sumsUploadURL, a.Path)
-					if err != nil {
-						panic(err) // TODO: handle error
-					}
-				}
+			// upload the checksum file
+			err = client.UploadFile(
+				context.Background(),
+				sumsUploadURL,
+				fmt.Sprintf(
+					"%s_%s_SHA256SUMS",
+					fullName,
+					ver,
+				),
+			)
+			if err != nil {
+				panic(err) // TODO: handle error
 			}
 		}
 
@@ -131,14 +151,18 @@ var rootCmd = &cobra.Command{
 				panic(err) // TODO: handle error
 			}
 
-			// get the signatures file out of the artifactSlice
-			for _, a := range *artifactSlice {
-				if a.Type == "Checksum" {
-					err = client.UploadFile(context.Background(), sigsUploadURL, a.Path)
-					if err != nil {
-						panic(err) // TODO: handle error
-					}
-				}
+			// upload the signatures file
+			err = client.UploadFile(
+				context.Background(),
+				sigsUploadURL,
+				fmt.Sprintf(
+					"%s_%s_SHA256SUMS.sig",
+					fullName,
+					ver,
+				),
+			)
+			if err != nil {
+				panic(err) // TODO: handle error
 			}
 		}
 
@@ -149,32 +173,41 @@ var rootCmd = &cobra.Command{
 			panic(err) // TODO: handle error
 		}
 
-		var artifact artifacts.Artifact
-
-		// get the platform from the artifactSlice
-		for _, a := range *artifactSlice {
-			if a.Type == "Archive" {
-				if strings.Contains(a.Path, filename) {
-					artifact = a
-				}
-			}
-		}
+		osName := strings.Split(filename, "_")[2]
+		arch := strings.Split(strings.Split(filename, "_")[3], ".")[0]
 
 		platformID := tfe.RegistryProviderPlatformID{
 			RegistryProviderVersionID: versionId,
-			OS:                        artifact.GoOS,
-			Arch:                      artifact.GoArch,
+			OS:                        osName,
+			Arch:                      arch,
+		}
+
+		// get the artifact checksum
+		f, err := os.Open(filename)
+		if err != nil {
+			log.Panic(err)
+		}
+		defer f.Close()
+
+		h := sha256.New()
+		if _, err := io.Copy(h, f); err != nil {
+			log.Panic(err)
 		}
 
 		// find platform if it exists. if not, create it.
-		platform, err := client.GetPrivateProviderPlatform(platformID)
+		platform, err := client.GetPrivateProviderPlatform(c, platformID)
 		if err != nil && err.Error() != "resource not found" {
 			panic(err) // TODO: handle error
 		}
 
 		if platform == nil {
 			log.Printf("Platform %v/%v/%v_%v not found. Creating.\n", name, ver, platformID.OS, platformID.Arch)
-			platform, err = client.CreatePrivateProviderPlatform(platformID, artifact.Extra.Checksum, filename)
+			platform, err = client.CreatePrivateProviderPlatform(
+				c,
+				platformID,
+				fmt.Sprintf("%x", h.Sum(nil)),
+				filename,
+			)
 			if err != nil {
 				panic(err) // TODO: handle error
 			}
@@ -203,8 +236,7 @@ func AddCommand(cmd *cobra.Command) {
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+		log.Fatalln(err)
 	}
 }
 
